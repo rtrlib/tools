@@ -1,103 +1,253 @@
 #!/usr/bin/python
-from socket import *
+
+import argparse
+import json
+import logging
 import re
-import xml
-import xml.dom.minidom as dom
+import socket
 import string
-import signal
 import sys
-from pprint import pprint
+import time
 
-def parse(xml, update, withdrawal): 
-  l = [] 
-  try:
-    tree = dom.parseString(xml)
-  except xml.parsers.expat.ExpatError:
-    print >> sys.stderr, xml
-    return []
+import multiprocessing as mp
+import xml.etree.ElementTree as ET
 
-  d = {}
-  for i in tree.firstChild.childNodes: 
-    if i.nodeName == "ASCII_MSG": 
-      schluessel = wert = None
-      for elems in i.childNodes: 
-        if elems.nodeName == "UPDATE": 
-	   if elems.firstChild.nodeName == "WITHDRAWN":
-		count = int(elems.firstChild.getAttribute("count"))
-		if ((update and withdrawal) or ((count == 0) and not withdrawal and update) or ((count > 0) and not update and withdrawal)):
-			  #print "count: " + str(count) + "\tupdate: " + str(update) + "\twithdrawal: " + str(withdrawal)
-			  d["update"] = update
-			  d["withdrawal"] = withdrawal
-			  d["count"] = elems.firstChild.getAttribute("count")
-			  for update in elems.childNodes: 
-			    if(update.nodeName == "NLRI"):
-			      for nlri in update.childNodes:
-				if(nlri.nodeName == "PREFIX"):
-				  for prefix in nlri.childNodes:
-				    if(prefix.nodeName == "ADDRESS"):
-				      for txt in prefix.childNodes:
-				        s = txt.data.split("/")
-				        if not "prefix" in d:
-				            d["prefix"] = []
-				        p = {}
-				        p["address"] =  s[0]
-				        p["len"] = s[1]
-				        d["prefix"].append(p)
-			    if(update.nodeName == "PATH_ATTRIBUTES"):
-			      for pattr in update.childNodes:
-				if(pattr.nodeName == "ATTRIBUTE"):
-				  for pattr in pattr.childNodes:
-				    if(pattr.nodeName == "AS_PATH"):
-				      for asPath in pattr.childNodes:
-				        if(asPath.nodeName == "AS_SEG"):
-				          length =  int(asPath.getAttribute("length"))
-				          origin_as = asPath.childNodes[length-1]
-				          d['as_path'] = asPath.childNodes
-				          d["origin_as"] = str(origin_as.childNodes[0].data)
-      break;
-  if("prefix" in d):
-    l.append(d)
-  return l
+def parse_bgp_message(xml):
+    """Returns a dict of a parsed BGP XML update message"""
+    logging.info("CALL parse_bgp_message")
+    try:
+        tree = ET.fromstring(xml)
+    except:
+        logging.exception ("Cannot parse XML: " + xml)
+        return None
+    logging.debug ("root: %s" % tree.tag)
+    for child in tree:
+        logging.debug (child.tag)
 
+    # check if source exists, otherwise return
+    src = tree.find('{urn:ietf:params:xml:ns:bgp_monitor}SOURCE')
+    if src is None:
+        logging.warning ("Invalid XML, no source!")
+        return None
+    src_peer = dict()
+    src_peer['addr'] = src.find('{urn:ietf:params:xml:ns:bgp_monitor}ADDRESS').text
+    src_peer['port'] = src.find('{urn:ietf:params:xml:ns:bgp_monitor}PORT').text
+    src_peer['asn'] = src.find('{urn:ietf:params:xml:ns:bgp_monitor}ASN2').text
 
-def main(update, withdrawal):
-	cli = socket( AF_INET,SOCK_STREAM)
-	cli.connect(("livebgp.netsec.colostate.edu", 50001))
-	data =""
-	msg = ""
-	signal.signal(signal.SIGPIPE, signal.SIG_DFL)
-	signal.signal(signal.SIGINT, signal.SIG_IGN)
+    # get timestamp
+    dt = tree.find('{urn:ietf:params:xml:ns:bgp_monitor}OBSERVED_TIME')
+    if dt is None:
+        logging.warning ("Invalid XML, no source!")
+        return None
+    ts = dt.find('{urn:ietf:params:xml:ns:bgp_monitor}TIMESTAMP').text
 
-	while True:
-	  data = cli.recv(1024) #14= </BGP_MESSAGE>
-	  if(re.search('</BGP_MESSAGE>', msg)):
-	    l = msg.split('</BGP_MESSAGE>', 1)
-	    bgp_update = l[0] + "</BGP_MESSAGE>"
-	    bgp_update = string.replace(bgp_update, "<xml>", "")
-	    d = parse(bgp_update, update, withdrawal)
-	    msg = ''.join(l[1:])
-	    for i in d:
-	      for j in i["prefix"]:
-		path = []
-		for k in i["as_path"]:
-		  path.append(str(k.childNodes[0].data))
-		print j["address"] + " " + j["len"] + " " + i["origin_as"]# + " " + str(i["update"]) + " " + str(i["withdrawal"]) + " " + str(i["count"])# +"\t" + string.join(path, ",")
-	  msg += str(data)
+    # check wether it is a keep alive message
+    keep_alive = tree.find('{urn:ietf:params:xml:ns:xfb}KEEP_ALIVE')
+    if keep_alive is not None:
+        logging.debug ("BGP KEEP ALIVE %s (AS %s)" % (src_peer['addr'], src_peer['asn']))
+        return None
 
+    # proceed with bgp update parsing
+    update = tree.find('{urn:ietf:params:xml:ns:xfb}UPDATE')
+    if update is None:
+        logging.warning ("Invalid XML, no update!")
+        return None
 
-if len(sys.argv) < 2:
-	print "wrong selection, choose -u for updates and/or -w for withdrawals"
-else:
-	if len(sys.argv) == 2:
-		if sys.argv[1] == "-u":
-			main(True, False)
-			#print "true false"
-		elif sys.argv[1] == "-w":
-			main(False, True)
-			#print "false true"
-	elif len(sys.argv) == 3:
-		if (sys.argv[1] == "-u" and sys.argv[2] == "-w") or (sys.argv[1] == "-w" and sys.argv[2] == "-u"):
-			main(True, True)
-			#print "true true"
-	else:
-		print "wrong selection, choose -u for updates and/or -w for withdrawals"
+    # init return struct
+    bgp_message = dict()
+    bgp_message['type'] = 'update'
+    bgp_message['source'] = src_peer
+    bgp_message['next_hop'] = None
+    bgp_message['timestamp'] = str(ts)
+    bgp_message['announce'] = list()
+    bgp_message['withdraw'] = list()
+    bgp_message['aspath'] = list()
+
+    # add withdrawn prefixes
+    withdraws = update.findall('.//{urn:ietf:params:xml:ns:xfb}WITHDRAW')
+    for withdraw in withdraws:
+        logging.debug ("BGP WITHDRAW %s by AS %s" % (withdraw.text,src_peer['asn']))
+        bgp_message['withdraw'].append(str(withdraw.text))
+
+    # add AS path
+    asp = update.find('{urn:ietf:params:xml:ns:xfb}AS_PATH')
+    if asp is not None:
+        for asn in asp.findall('.//{urn:ietf:params:xml:ns:xfb}ASN2'):
+                bgp_message['aspath'].append(str(asn.text))
+
+    # add next hop
+    next_hop = update.find('{urn:ietf:params:xml:ns:xfb}NEXT_HOP')
+    if next_hop is not None:
+        bgp_message['next_hop'] = next_hop.text
+
+    # add announced prefixes
+    prefixes = update.findall('.//{urn:ietf:params:xml:ns:xfb}NLRI')
+    for prefix in prefixes:
+        logging.debug ("BGP ANNOUNCE %s by AS %s" % (prefix.text,src_peer['asn']))
+        bgp_message['announce'].append(str(prefix.text))
+
+    return bgp_message
+
+def _init_bgpmon_sock(host, port):
+    bm_sock =  socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        bm_sock.connect((host,port))
+    except:
+        logging.critical ("Failed to connect to BGPmon XML RIB stream!")
+        sys.exit(1)
+    return bm_sock
+
+def recv_bgpmon_rib(host, port, queue):
+    """Read the RIB XML stream of bgpmon"""
+    logging.info ("CALL recv_bgpmon_rib (%s:%d)", host, port)
+    # open connection
+    sock = _init_bgpmon_sock(host,port)
+    data = ""
+    stream = ""
+    # receive data
+    run = True
+    parse = False
+    logging.info("receiving XML RIB stream ...")
+    while(run):
+        data = sock.recv(1024)
+        if not data:
+            sock.close()
+            time.sleep(60)
+            sock = _init_bgpmon_sock(host,port)
+            continue
+
+        stream += data
+        stream = string.replace(stream, "<xml>", "")
+        while (re.search('</BGP_MONITOR_MESSAGE>', stream)):
+            messages = stream.split('</BGP_MONITOR_MESSAGE>')
+            msg = messages[0] + '</BGP_MONITOR_MESSAGE>'
+            # stop RIB parsing after TABLE_STOP message
+            if re.search('TABLE_STOP', msg):
+                logging.info("found TABLE_STOP in XML RIB stream.")
+                parse = False
+            stream = '</BGP_MONITOR_MESSAGE>'.join(messages[1:])
+            # parse RIB message if parsing is enabled
+            if parse:
+                result = parse_bgp_message(msg)
+                if result:
+                    queue.put(result)
+            # start RIB parsing after TABLE_START message
+            elif re.search('TABLE_START', msg):
+                logging.info("found TABLE_START in XML RIB stream.")
+                parse = True
+
+    sock.close()
+    return True
+
+def recv_bgpmon_updates(host, port, queue):
+    """Read the BGP update XML stream of bgpmon"""
+    logging.info ("CALL recv_bgpmon_updates (%s:%d)", host, port)
+    # open connection
+    sock = _init_bgpmon_sock(host,port)
+    data = ""
+    stream = ""
+    # receive data
+    logging.info("receiving XML update stream ...")
+    while(True):
+        data = sock.recv(1024)
+        if not data:
+            sock.close()
+            time.sleep(60)
+            sock = _init_bgpmon_sock(host,port)
+            continue
+        stream += data
+        stream = string.replace(stream, "<xml>", "")
+        while (re.search('</BGP_MONITOR_MESSAGE>', stream)):
+            messages = stream.split('</BGP_MONITOR_MESSAGE>')
+            msg = messages[0] + '</BGP_MONITOR_MESSAGE>'
+            stream = '</BGP_MONITOR_MESSAGE>'.join(messages[1:])
+            result = parse_bgp_message(msg)
+            if result:
+                queue.put(result)
+    return True
+
+def output_json(queue):
+    """Output parsed BGP messages as JSON to STDOUT"""
+    logging.info ("CALL output_json")
+    while True:
+        odata = queue.get()
+        if (odata == 'STOP'):
+            break
+        json_str = json.dumps(odata)
+        print json_str
+        sys.stdout.flush()
+    return True
+
+def output_csv(queue):
+    """Output parsed BGP messages as CSV to STDOUT"""
+    logging.info ("CALL output_csv")
+    print "#prefix, prefix length, origin asn, type"
+    while True:
+        odata = queue.get()
+        if (odata == 'STOP'):
+            break
+        #prefix,len,origin,type
+        for p in odata['announce']:
+            pfx, pln = p.split('/')
+            print ','.join([pfx,pln,odata['aspath'][-1],'announce'])
+        for p in odata['withdraw']:
+            pfx, pln = p.split('/')
+            print ','.join([pfx,pln,"",'withdraw'])
+        sys.stdout.flush()
+    return True
+
+def main():
+    """The main loop"""
+    parser = argparse.ArgumentParser(description='Parse XML streams (updates, rib) of a BGPmon instance. Output on STDOUT as JSON (Default) or simple CSV (less information).', epilog='')
+    parser.add_argument('-l', '--loglevel',
+                        help='Set loglevel [DEBUG,INFO,WARNING,ERROR,CRITICAL].',
+                        type=str, default='ERROR')
+    parser.add_argument('-a', '--addr',
+                        help='Address or name of BGPmon host (Default: localhost).',
+                        type=str, default='localhost')
+    parser.add_argument('-u', '--uport',
+                        help='Port of BGPmon Update XML stream (Default: 50001).',
+                        type=int, default=50001)
+    parser.add_argument('-r', '--rport',
+                        help='Port of BGPmon RIB XML stream (Default: disabled).',
+                        type=int, default=0)
+    parser.add_argument('-c', '--csv',
+                        help='Output parsed data as CSV (Default: JSON).',
+                        action='store_true')
+    args = vars(parser.parse_args())
+
+    numeric_level = getattr(logging, args['loglevel'].upper(), None)
+    if not isinstance(numeric_level, int):
+        raise ValueError('Invalid log level: %s' % loglevel)
+    logging.basicConfig(level=numeric_level,
+                        format='%(asctime)s : %(levelname)s : %(message)s')
+
+    addr = args['addr'].strip()
+
+    logging.info("START")
+
+    output_queue = mp.Queue()
+    ot = mp.Process(target=output_json, args=(output_queue,))
+    if args['csv']:
+        ot = mp.Process(target=output_csv, args=(output_queue,))
+
+    try:
+        ot.start()
+        if args['rport'] > 0:
+            rt = mp.Process(target=recv_bgpmon_rib,
+                            args=(addr,args['rport'], output_queue))
+            rt.start()
+        recv_bgpmon_updates(addr,args['uport'],output_queue)
+    except KeyboardInterrupt:
+        logging.exception ("ABORT")
+    finally:
+        output_queue.put("STOP")
+
+    if args['rport'] > 0:
+        rt.terminate()
+    ot.join()
+    logging.info("FINISH")
+    # END
+
+if __name__ == "__main__":
+    main()
