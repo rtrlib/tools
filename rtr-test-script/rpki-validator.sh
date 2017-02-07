@@ -12,6 +12,9 @@
 #done
 #printf " done!\n"
 
+#get the current path
+path=$( pwd )
+
 #convert the rib dump to readable bgp data
 printf "Converting RIB dump to readable BGP...\n"
 ./bgpdump -M -O $1.temp $1
@@ -23,13 +26,16 @@ awk -F '|' '{print $6 " " $7}' $1.temp | awk '{ print $1 " " $NF }' | sed '/{/d'
 printf " done!\n"
 
 # the lpfst implementation of the RTRlib
-LD_PRELOAD=/home/colin/projects/shell/ripe-rtr-validator/v2/libs/librtr-lpfst/librtr.so ./rtr-validator $1.formatted lpfst-result.txt $2 $3
+LD_PRELOAD=$path/libs/librtr-lpfst/librtr.so ./rtr-validator $1.formatted lpfst-result.txt $2 $3
 
 # the trie implementation of the RTRlib
-LD_PRELOAD=/home/colin/projects/shell/ripe-rtr-validator/v2/libs/librtr-trie/librtr.so ./rtr-validator $1.formatted trie-result.txt $2 $3
+LD_PRELOAD=$path/libs/librtr-trie/librtr.so ./rtr-validator $1.formatted trie-result.txt $2 $3
+
+# the spfst implementation of the RTRlib
+LD_PRELOAD=$path/libs/librtr-spfst/librtr.so ./rtr-validator $1.formatted spfst-result.txt $2 $3
 
 # the RIPE RPKI validator implementation
-sh validate-ripe.sh $1.formatted
+#sh validate-ripe.sh $1.formatted
 
 # cleanup
 printf "Cleanup..."
