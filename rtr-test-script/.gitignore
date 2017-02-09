@@ -5,7 +5,4 @@ results/
 tmp/
 
 # files
-*.txt
-*.temp
-*.formatted
 rib*

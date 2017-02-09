@@ -1,4 +1,3 @@
-DUMP_DIR=$( pwd )
 RIB_DUMP=$( basename $1 )
 EXECUTION_DIR=`dirname "$BASH_SOURCE"`
 cd ${EXECUTION_DIR}

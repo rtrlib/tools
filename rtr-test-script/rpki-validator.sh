@@ -1,3 +1,8 @@
+MAIN_DUMP_DIR=$( realpath $1 )
+EXECUTION_DIR=`dirname "$BASH_SOURCE"`
+cd ${EXECUTION_DIR}
+CURRENT_DIR=$( pwd )
+
 #printf "Removing old cache data..."
 #rm rpki-validator-app-*/data_backup/* -rf
 #mv rpki-validator-app-*/data/ rpki-validator-app*/data_backup/
@@ -12,14 +17,14 @@
 #done
 #printf " done!\n"
 
-sh scripts/prepare-rib.sh $1
+sh $CURRENT_DIR/scripts/prepare-rib.sh $MAIN_DUMP_DIR
 
-sh scripts/validate-rtr.sh $1 $2 $3
+sh $CURRENT_DIR/scripts/validate-rtr.sh $MAIN_DUMP_DIR $2 $3
 
 # the RIPE RPKI validator implementation
-sh scripts/validate-ripe.sh $1.formatted
+sh $CURRENT_DIR/scripts/validate-ripe.sh $MAIN_DUMP_DIR
 
 # cleanup
 printf "Cleanup..."
-rm $1.temp $1.formatted*
+rm $CURRENT_DIR/tmp/*
 printf " done!\n"
