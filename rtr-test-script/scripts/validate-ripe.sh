@@ -19,4 +19,4 @@ done < ../tmp/$RIB_DUMP.formatted
 printf " done!\n"
 
 # filter and sort the RPKI validation result
-sed '/{/d' ../tmp/$RIB_DUMP.apiresult | sort -u > ../results/rpki-result.txt
+sed '/{/d' ../tmp/$RIB_DUMP.apiresult | sort -u -k 1 > ../results/rpki-result.txt

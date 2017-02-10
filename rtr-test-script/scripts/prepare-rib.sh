@@ -10,5 +10,5 @@ printf " done!\n"
 
 #take only ASN and Prefix and write them to different files
 printf "Filter unnecessary data, sort and uniq it..."
-awk -F '|' '{print $6 " " $7}' ../tmp/$RIB_DUMP.temp | awk '{ print $1 " " $NF }' | sed '/{/d' | sort -u > ../tmp/$RIB_DUMP.formatted
+awk -F '|' '{print $6 " " $7}' ../tmp/$RIB_DUMP.temp | awk '{ print $1 " " $NF }' | sed '/{/d' | sort -u -k 1 > ../tmp/$RIB_DUMP.formatted
 printf " done!\n"
